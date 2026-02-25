@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>АРМ: Цех техводопостачання та шламового господарства</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 text-gray-800 h-screen flex flex-col">
+<header class="bg-blue-800 text-white px-6 py-4 flex justify-between">
+    <h1 class="font-bold text-xl">Система обліку ЦТВ та ШГ</h1>
+    <div id="current-date"></div>
+</header>
+<div class="p-4 flex gap-4">
+    <button id="tab-report" class="font-semibold text-blue-700" onclick="switchTab('report')">Щоденний рапорт</button>
+    <button id="tab-dashboard" onclick="switchTab('dashboard')">Місячний дашборд</button>
+</div>
+<main class="p-6 overflow-y-auto">
+    <section id="view-report">
+        <form id="dailyForm" class="space-y-6">
+            <div class="grid grid-cols-2 gap-4 bg-white p-4 rounded shadow">
+                <input id="volWater" type="number" step="0.01" placeholder="Обʼєм тех. води" class="border p-2" required>
+                <input id="volSlurry" type="number" step="0.01" placeholder="Обʼєм пульпи" class="border p-2" required>
+                <input id="volDredge" type="number" step="0.01" placeholder="Обʼєм земснаряд" class="border p-2">
+                <input id="volDns3" type="number" step="0.01" placeholder="Обʼєм ДНС-3" class="border p-2">
+                <input id="volEmergencyDrop" type="number" step="0.01" placeholder="Скинуто в ав. ємність" class="border p-2">
+                <input id="energyAbs" type="number" step="0.01" placeholder="Енергія" class="border p-2" required>
+            </div>
+
+            <div class="bg-white p-4 rounded shadow">
+                <h2 class="font-semibold mb-2">Рівні</h2>
+                <div id="reservoirRows" class="space-y-2"></div>
+            </div>
+
+            <div class="bg-white p-4 rounded shadow">
+                <h2 class="font-semibold mb-2">Години обладнання</h2>
+                <table class="w-full text-sm"><thead><tr><th>Обладнання</th><th>Робота</th><th>Резерв</th><th>Мех</th><th>Ел</th><th>Тех</th></tr></thead><tbody id="equipmentTable"></tbody></table>
+            </div>
+            <button class="bg-blue-600 text-white px-6 py-2 rounded" type="submit">Зберегти рапорт</button>
+        </form>
+    </section>
+
+    <section id="view-dashboard" class="hidden space-y-4">
+        <div class="grid grid-cols-4 gap-4">
+            <div class="bg-white p-3 rounded shadow"><div class="text-xs">Тех. вода</div><div id="kpiWater" class="text-xl font-bold">0</div></div>
+            <div class="bg-white p-3 rounded shadow"><div class="text-xs">Пульпа</div><div id="kpiSlurry" class="text-xl font-bold">0</div></div>
+            <div class="bg-white p-3 rounded shadow"><div class="text-xs">Сер. КТГ</div><div id="kpiKtg" class="text-xl font-bold">0</div></div>
+            <div class="bg-white p-3 rounded shadow"><div class="text-xs">Питоме споживання</div><div id="kpiEnergy" class="text-xl font-bold">0</div></div>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+            <div class="bg-white p-4 rounded shadow"><canvas id="volumeChart"></canvas></div>
+            <div class="bg-white p-4 rounded shadow"><canvas id="downtimeChart"></canvas></div>
+        </div>
+    </section>
+</main>
+
+<script>
+const apiBase = '/api';
+let accessToken = localStorage.getItem('access_token') || '';
+const reservoirs = [
+  ['tailing_1','Хвостосховище 1'],['tailing_2','Хвостосховище 2'],['buffer_pond','Буферний ставок'],['water_pond','Ставок об. вод.'],['emergency_tank','Аварійна ємність']
+];
+
+function switchTab(tab) {
+  document.getElementById('view-report').classList.toggle('hidden', tab !== 'report');
+  document.getElementById('view-dashboard').classList.toggle('hidden', tab !== 'dashboard');
+  if (tab === 'dashboard') loadDashboard();
+}
+
+function authHeaders() {
+  return accessToken ? {Authorization: `Bearer ${accessToken}`} : {};
+}
+
+async function loginDemo() {
+  if (accessToken) return;
+  const username = prompt('Логін');
+  const password = prompt('Пароль');
+  const res = await fetch(`${apiBase}/auth/login/`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({username, password})
+  });
+  if (!res.ok) return alert('Не вдалося авторизуватись');
+  const data = await res.json();
+  accessToken = data.access;
+  localStorage.setItem('access_token', accessToken);
+}
+
+function renderReservoirRows() {
+  const c = document.getElementById('reservoirRows');
+  reservoirs.forEach(([key,label]) => {
+    const row = document.createElement('div');
+    row.className = 'grid grid-cols-3 gap-2';
+    row.innerHTML = `<div>${label}</div><input data-r="${key}" data-f="start" type="number" step="0.01" class="border p-1" placeholder="Початок"><input data-r="${key}" data-f="end" type="number" step="0.01" class="border p-1" placeholder="Кінець">`;
+    c.appendChild(row);
+  });
+}
+
+async function loadEquipment() {
+  const res = await fetch(`${apiBase}/equipment/`, {headers: {...authHeaders()}});
+  if (!res.ok) return;
+  const data = await res.json();
+  const tbody = document.getElementById('equipmentTable');
+  tbody.innerHTML = '';
+  data.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${item.name}</td><td><input type="number" step="0.01" max="12" data-e="${item.id}" data-f="work"></td><td><input type="number" step="0.01" max="12" data-e="${item.id}" data-f="reserve"></td><td><input type="number" step="0.01" max="12" data-e="${item.id}" data-f="mech"></td><td><input type="number" step="0.01" max="12" data-e="${item.id}" data-f="el"></td><td><input type="number" step="0.01" max="12" data-e="${item.id}" data-f="tech"></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function saveDailyReport(e) {
+  e.preventDefault();
+  const reservoirData = reservoirs.map(([key]) => ({
+    reservoir_name: key,
+    level_start_m: parseFloat(document.querySelector(`[data-r="${key}"][data-f="start"]`).value || 0),
+    level_end_m: parseFloat(document.querySelector(`[data-r="${key}"][data-f="end"]`).value || 0),
+  }));
+
+  const grouped = {};
+  document.querySelectorAll('#equipmentTable input').forEach(input => {
+    const id = input.dataset.e;
+    grouped[id] = grouped[id] || {equipment: parseInt(id), work_hours:0, reserve_hours:0, downtime_mech:0, downtime_el:0, downtime_tech:0};
+    const v = parseFloat(input.value || 0);
+    if (input.dataset.f === 'work') grouped[id].work_hours = v;
+    if (input.dataset.f === 'reserve') grouped[id].reserve_hours = v;
+    if (input.dataset.f === 'mech') grouped[id].downtime_mech = v;
+    if (input.dataset.f === 'el') grouped[id].downtime_el = v;
+    if (input.dataset.f === 'tech') grouped[id].downtime_tech = v;
+  });
+
+  const payload = {
+    shift_date: new Date().toISOString().slice(0,10),
+    shift_number: 1,
+    production_metrics: {
+      vol_water: parseFloat(volWater.value || 0), vol_slurry: parseFloat(volSlurry.value || 0),
+      vol_dredge: parseFloat(volDredge.value || 0), vol_dns3: parseFloat(volDns3.value || 0),
+      vol_emergency_drop: parseFloat(volEmergencyDrop.value || 0), energy_abs: parseFloat(energyAbs.value || 0),
+    },
+    reservoir_levels: reservoirData,
+    equipment_time_logs: Object.values(grouped),
+  };
+
+  const res = await fetch(`${apiBase}/shift-reports/`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json', ...authHeaders()},
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) return alert('Помилка збереження');
+  alert('Рапорт збережено');
+}
+
+document.getElementById('dailyForm').addEventListener('submit', saveDailyReport);
+
+let volumeChart, downtimeChart;
+async function loadDashboard() {
+  const res = await fetch(`${apiBase}/dashboard/summary/`, {headers: {...authHeaders()}});
+  if (!res.ok) return;
+  const data = await res.json();
+  kpiWater.textContent = data.kpis.total_water_mtd;
+  kpiSlurry.textContent = data.kpis.total_slurry_mtd;
+  kpiKtg.textContent = data.kpis.avg_ktg_percent;
+  kpiEnergy.textContent = data.kpis.avg_specific_energy;
+
+  volumeChart?.destroy();
+  downtimeChart?.destroy();
+  volumeChart = new Chart(document.getElementById('volumeChart'), {
+    type: 'bar',
+    data: {labels: data.volume_chart.labels, datasets:[{label:'Пульпа', data:data.volume_chart.slurry}, {label:'Вода', type:'line', data:data.volume_chart.water}]}
+  });
+  downtimeChart = new Chart(document.getElementById('downtimeChart'), {
+    type: 'doughnut',
+    data: {labels:['Механічний','Електричний','Технологічний'], datasets:[{data:[data.downtime.mechanical, data.downtime.electrical, data.downtime.technological]}]}
+  });
+}
+
+document.getElementById('current-date').textContent = new Date().toLocaleDateString('uk-UA');
+renderReservoirRows();
+loginDemo().then(loadEquipment);
+</script>
+</body>
+</html>
