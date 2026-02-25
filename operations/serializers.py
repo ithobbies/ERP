@@ -222,10 +222,13 @@ class TmcWriteOffSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def create(self, validated_data):
-        item = validated_data['item']
+        item = TmcCatalog.objects.select_for_update().get(pk=validated_data['item'].pk)
         quantity = validated_data['quantity']
+        if quantity <= 0:
+            raise serializers.ValidationError('Кількість списання має бути більшою за нуль.')
         if quantity > item.current_stock:
             raise serializers.ValidationError('Недостатній залишок ТМЦ на складі.')
         item.current_stock -= quantity
         item.save(update_fields=['current_stock'])
+        validated_data['item'] = item
         return TmcWriteOff.objects.create(author=self.context['request'].user, **validated_data)
